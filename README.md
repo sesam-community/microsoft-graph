@@ -42,12 +42,12 @@ A small microservice to get microsoft graph api
 
 ```
 {
-  "_id": "cvpartner",
+  "_id": "microsoft-graph",
   "type": "system:microservice",
   "docker": {
     "environment": {
       "base_url": "https://graph.microsoft.com/v1.0/",
-      "token_payload": "$SECRET(your_token_payload_secret)"
+      "token_payload": "$SECRET(your_token_payload_secret)",
       "token_url": "https://[your_microsoft_login_site]/oauth2/token"  
     },
     "image": "sesamcommunity/microsoft-graph:latest",
