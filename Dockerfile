@@ -1,11 +1,8 @@
-FROM python:3-alpine
+FROM python:3.7-alpine
 MAINTAINER Ashkan Vahidishams "ashkan.vahidishams@sesam.io"
 COPY ./service /service
-
-RUN pip install --upgrade pip
-
-RUN pip install -r /service/requirements.txt
-
+WORKDIR /service
+RUN pip install --upgrade pip &&  pip install -r /service/requirements.txt && chmod -x ./microsoft-graph.py
 EXPOSE 5000/tcp
-
-CMD ["python3", "-u", "./service/microsoft-graph.py"]
+ENTRYPOINT ["python"]
+CMD ["microsoft-graph.py"]
