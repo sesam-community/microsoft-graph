@@ -1,69 +1,80 @@
-from flask import Flask, request, Response
-
 import os
 import requests
-import logging
 import json
-import dotdictify
-
+from sesamutils.flask import serve
+from sesamutils.sesamlogger import sesam_logger
+from sesamutils.dotdictify import Dotdictify
+from flask import Flask, request, Response
 
 app = Flask(__name__)
-logger = None
-format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-logger = logging.getLogger('microsoft-graph')
 
-# Log to stdout
-stdout_handler = logging.StreamHandler()
-stdout_handler.setFormatter(logging.Formatter(format_string))
-logger.addHandler(stdout_handler)
-logger.setLevel(logging.DEBUG)
+logger = sesam_logger('microsoft-graph', app=app)
 
 
 def get_token():
-    logger.info("Creating header")
+    auth_url = os.environ.get('token_url')
+    logger.info(f"trying to obtain access token from {auth_url}")
     payload = json.loads((os.environ.get("token_payload")).replace("'", "\""))
-    resp = requests.post(url=os.environ.get("token_url"), data=payload)
-    logger.info("fetching access token from " + os.environ.get('token_url'))
+    resp = requests.post(url=auth_url, data=payload)
+    resp.raise_for_status()
+    logger.info(f"fetched access token from {auth_url}")
     return resp
 
 
 class DataAccess:
 
-#main get function, will probably run most via path:path
-    def __get_all_paged_entities(self, path,access_token, args):
-        logger.info("Fetching data from paged url: %s", path)
+    @staticmethod
+    def __get_all_paged_entities(path, access_token, args):
+        """
+        internal get function
+        :param path:
+        :param access_token: Oauth2 access token string
+        :param args:
+        :return:
+        """
+        logger.info(f"fetching data from paged url: {path}")
 
         since = args.get("since")
         if since is not None:
             ##TODO
             ##I do not think this works correctly with graph to sharepoint API. This needs to be fixed in the future.
-            logger.info("Fetching data from list: %s, since %s", path, since)
-            url = os.environ.get("base_url") + path + "?expand=fields&$OrderBy=lastModifiedDateTime&$filter=lastModifiedDateTime ge datetime'" + since + "'"
+            logger.info(f"fetching data from list: {path}, since {since}")
+            url = os.environ.get(
+                "base_url") + path + "?expand=fields&$OrderBy=lastModifiedDateTime&$filter=lastModifiedDateTime ge datetime'" + since + "'"
         else:
-            logger.info("Fetching data from list: %s", path)
+            logger.info(f"fetching data from list: {path}")
             url = os.environ.get("base_url") + path + "?expand=fields"
 
-        req = requests.get(url,  headers={'Authorization': 'Bearer ' + access_token})
-        if req.status_code == 200:
-            next = json.loads(req.text).get('@odata.nextLink')
+        response = requests.get(url, headers={'Authorization': 'Bearer ' + access_token})
+        response.raise_for_status()
 
-            while next is not None:
-                for entity in dotdictify.dotdictify(json.loads(req.text)).value:
-                    yield set_updated(entity, args)
-                req = requests.get(next, headers={'Authorization': 'Bearer ' + access_token})
-                next = json.loads(req.text).get('@odata.nextLink')
+        response_data = response.json()
+        next_page = response_data.get('@odata.nextLink')
 
-            else:
-                for entity in dotdictify.dotdictify(json.loads(req.text)).value:
-                    yield set_updated(entity, args)
+        if not response_data.get('value'):
+            raise ValueError(f'value object not found in response: {response_data}')
+
+        while next_page is not None:
+            for entity in Dotdictify(response_data).value:
+                yield set_updated(entity, args)
+            response = requests.get(next_page, headers={'Authorization': 'Bearer ' + access_token})
+            response_data = response.json()
+            next_page = response_data.get('@odata.nextLink')
 
         else:
-            logger.error(json.dumps(req.json()))
-            return req
+            for entity in Dotdictify(response_data).value:
+                yield set_updated(entity, args)
 
     def get_entities(self, path, access_token, args):
-        print("getting all paged")
+        """
+        main get function, will probably run most via path:path
+        :param path:
+        :param access_token:
+        :param args:
+        :return:
+        """
         return self.__get_all_paged_entities(path, access_token, args)
+
 
 data_access_layer = DataAccess()
 
@@ -72,35 +83,39 @@ def set_updated(entity, args):
     since_path = args.get("since_path")
 
     if since_path is not None:
-        b = dotdictify.dotdictify(entity)
+        b = Dotdictify(entity)
         entity["_updated"] = b.get(since_path)
 
     return entity
 
 
-def stream_json(clean):
+def stream_json(generator_func):
     first = True
     yield '['
-    for i, row in enumerate(clean):
+    for i, row in enumerate(generator_func):
         if not first:
             yield ','
         else:
             first = False
         yield json.dumps(row)
     yield ']'
+    logger.info(f"successfully processed {i+1} entities")
 
 
 @app.route("/<path:path>", methods=["GET"])
 def get(path):
-    resp = get_token()
-    if resp.status_code == 200:
-        access_token = dotdictify.dotdictify(resp.json()).access_token
+    try:
+        resp = get_token()
+        resp.raise_for_status()
 
-        entities = data_access_layer.get_entities(path, access_token, args=request.args)
-        return Response(stream_json(entities),mimetype='application/json')
-    else:
-        logger.error(json.dumps(resp.json()))
-        return Response(json.dumps(resp.json()), status=resp.status_code, mimetype='application/json')
+        access_token = Dotdictify(resp.json()).access_token
+        entities_generator = data_access_layer.get_entities(path, access_token, args=request.args)
+
+        return Response(stream_json(entities_generator), mimetype='application/json')
+    except requests.exceptions.HTTPError as exc:
+        logger.error(f'exception {exc} occurred, response returned: {resp.text}')
+        return Response(resp.text, status=resp.status_code, mimetype='application/json')
+
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', threaded=True, port=os.environ.get('port',5000))
+    serve(app)
